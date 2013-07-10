@@ -3,7 +3,7 @@
 # This script assumes that the following change is made
 #   bro:id:`use_conn_size_analyzer` = T
 #
-#
+# It is a test script.
 @load shunt_queue
 
 redef use_conn_size_analyzer = T;
