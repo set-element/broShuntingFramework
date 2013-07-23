@@ -3,7 +3,7 @@
 # This script assumes that the following change is made
 #   bro:id:`use_conn_size_analyzer` = T
 #
-# It is a test script.
+#
 @load shunt_queue
 
 redef use_conn_size_analyzer = T;
@@ -38,12 +38,12 @@ export {
 		id: conn_id &log;
 		};
 
-	global shunt_tracker: table[addr,addr] of count;	# identify pairs of o/r IP common to many flows
+	global shunt_tracker: table[string] of count;	# identify pairs of o/r IP common to many flows
 
-	const shunt_threshold =  10240000 &redef; # this is the shunt threshold; here 10M / 30 sec = 
+	const shunt_threshold =  102400000 &redef; # this is the shunt threshold; here 10M / 30 sec = 
 	const twoG = 2147483648;		#
 
-	const initial_delay = 0.01 sec &redef;	# delay between S/SA/A and first peek
+	const initial_delay = 0.05 sec &redef;	# delay between S/SA/A and first peek
 	const data_test_delay = .1 sec &redef;	# continuing delay between looking at conn sizes
 	const cutoff_time = 30 sec &redef;	# end of measuring time window - if it takes more than 
 						#  cutoff_time to get the shunt_threshold, we punt
@@ -51,6 +51,7 @@ export {
 						#  pairs to dump all data for *new* flows
 	const shunt_track_low_water = 2 &redef; # if count falls at or below this, stop adding new flows to IP track
 
+	global get_key: function(a1: addr, a2: addr) : string;
 	global log_shunt: event(rec: Info);
 
 }
@@ -71,10 +72,48 @@ function shunt_message(s: Info)
 
 	}
 
+# the index for {IP,IP} flow monitoring is symmetric with regard 
+#  to source and dest since the shunt deals with things that way.
+#
+function get_key(a1: addr, a2: addr) : string
+	{
+	local ret: string = "NONE";
+
+	if ( a1 < a2 )
+		ret = fmt("%s%s", a1, a2);
+	else
+		ret = fmt("%s%s", a2, a1);
+
+	return ret;
+	}
+
 function print_cid(cid: conn_id): string
 	{
 	local rs: string = fmt("%s -> %s:%s", cid$orig_h, cid$resp_h, cid$resp_p);
 	return rs;
+	}
+
+
+# This function tests the existance of the connection address pair in the 
+#  flow blocker table.
+#
+function flow_tracker_test(c: connection): count
+	{
+	if ( ! c?$shunt_element )
+		return 0;
+
+	local oA: addr = c$id$orig_h;
+	local rA: addr = c$id$resp_h;
+	local ret: count = 0;
+	local key = get_key(oA,rA);
+
+	if ( key in shunt_tracker ) {
+
+		if ( shunt_tracker[key] >= shunt_track_high_water )
+			ret = 1;
+
+		}
+	return ret;
 	}
 
 # This function tracks the collective behavior of address pairs looking for 
@@ -88,9 +127,9 @@ function flow_tracker_add(c: connection): count
 
 	local oA: addr = c$id$orig_h;
 	local rA: addr = c$id$resp_h;
+	local key = get_key(oA,rA);
 
-
-	if ( [oA,rA] in shunt_tracker ) {
+	if ( key in shunt_tracker ) {
 
 		# If the trigger time = 0.0, then we know that the data
 		#  struct has not been filled in yet
@@ -102,17 +141,17 @@ function flow_tracker_add(c: connection): count
 
 			#NOTICE([$note=ShuntTrackerIncrement, $conn=c, 
 			#	$msg=fmt("%.6f ShuntTracker increment %s -> %s [%s]", 
-			#		network_time(), oA, rA, shunt_tracker[oA,rA])]);
+			#		network_time(), oA, rA, shunt_tracker[key])]);
 			}
 
-		if ( ++shunt_tracker[oA,rA] == shunt_track_high_water ) {
+		if ( ++shunt_tracker[key] == shunt_track_high_water ) {
 
 			c$shunt_element$state = "ShuntTrackerHighWater";
 			shunt_message(c$shunt_element);
 
 			#NOTICE([$note=ShuntTrackerHWater, $conn=c, 
 			#	$msg=fmt("%.6f ShuntTracker high_water %s -> %s [%s]", 
-			#		network_time(), oA, rA, shunt_tracker[oA,rA])]);
+			#		network_time(), oA, rA, shunt_tracker[key])]);
 			}
 		}
 	else {
@@ -120,10 +159,10 @@ function flow_tracker_add(c: connection): count
 		c$shunt_element$state = "FlowTrackInit";
 		shunt_message(c$shunt_element);
 
-		shunt_tracker[oA,rA] = 1;
+		shunt_tracker[key] = 1;
 		}
 	
-	return shunt_tracker[oA,rA];
+	return shunt_tracker[key];
 	} # end function
 
 # Oposite to the above function - remove flow information at connection close
@@ -139,10 +178,11 @@ function flow_tracker_remove(c: connection): count
 	local oA: addr = c$id$orig_h;
 	local rA: addr = c$id$resp_h;
 	local ret_val = 0;
+	local key = get_key(oA,rA);
 
-	if ( [oA,rA] in shunt_tracker ) {
+	if ( key in shunt_tracker ) {
 
-		if ( --shunt_tracker[oA,rA] == shunt_track_low_water ) {
+		if ( --shunt_tracker[key] == shunt_track_low_water ) {
 
 			if ( c$shunt_element$pr_time != 0.0 ) {
 
@@ -151,14 +191,14 @@ function flow_tracker_remove(c: connection): count
 
 				#NOTICE([$note=ShuntTrackerLWater, $conn=c, 
 				#	$msg=fmt("%.6f ShuntTracker low_water %s -> %s [%s]", 
-				#		network_time(), oA, rA, shunt_tracker[oA,rA])]);
+				#		network_time(), oA, rA, shunt_tracker[key])]);
 				}
 		}
 
-		ret_val = shunt_tracker[oA,rA];
+		ret_val = shunt_tracker[key];
 
-		if ( shunt_tracker[oA,rA] == 0 ){
-			delete shunt_tracker[oA,rA];
+		if ( shunt_tracker[key] == 0 ){
+			delete shunt_tracker[key];
 
 			c$shunt_element$state = "FlowTrackRemove";
 			shunt_message(c$shunt_element);
@@ -188,6 +228,10 @@ function clear_shunt(c: connection)
 		c$shunt_element$orig_d = c$orig$num_bytes_ip;
 		c$shunt_element$resp_d = c$resp$num_bytes_ip;
 		c$shunt_element$clear = T;
+
+		#if ( flow_tracker_test(c) == 1 ) {
+	
+			
 
 		shunt_message(c$shunt_element);
 
@@ -274,6 +318,8 @@ event test_connection(c:connection)
 					time_to_double(network_time()) - c$shunt_element$pr_time, 
 					(1.0 * s_d)/(interval_to_double(c$duration)+0.01) )]);
         
+			event ShuntQ::shunt_connection(c,"CONN",c$shunt_element$pr_time);
+
 			# check with the flow tracker to see if the connection being looked at 
 			#  has already been identified as an IP->IP high flow pair
                		if (flow_tracker_add(c) >= shunt_track_high_water ) {
@@ -285,12 +331,12 @@ event test_connection(c:connection)
 					$msg=fmt("%.6f ShuntFlowIPIgnore %s -> %s",
 						network_time(), c$id$orig_h, c$id$resp_h)]);
 
+				event ShuntQ::shunt_connection(c,"IP_PAIR",c$shunt_element$pr_time);
 				#skip_further_processing(c$id);
 				}
 			else {
 				# code for inserting flow into shunt
 				#skip_further_processing(c$id);
-				shunt_connection(c,"TEST",c$shunt_element$pr_time);
 				}
  
                         return;
@@ -300,6 +346,12 @@ event test_connection(c:connection)
 			#  so reschedule another look
 			schedule data_test_delay { test_connection(c) };
                 } # trigger == F test
+
+	# New test
+	c$shunt_element$resp_d = c$resp$num_bytes_ip;
+	c$shunt_element$orig_d = c$orig$num_bytes_ip;
+	# end new test
+
         return;         
         }
 
